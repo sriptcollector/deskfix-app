@@ -276,13 +276,14 @@ export function Panel() {
       }
       live.current = false;
       const left = meRef.current?.fixes.limit ?? 5;
+      const canBuy = meRef.current?.checkout !== false;
       const P: Record<string, Card> = {
         offline: { kind: "problem", title: "The internet dropped for a moment", body: "Check your Wi-Fi, then try again." },
         busy: { kind: "problem", title: "I can't think right now", body: "Try again in a minute." },
         cap: { kind: "problem", title: "This one is taking too long", body: "Ask again in a simpler way, or copy a summary for a person to help." },
         paused: { kind: "problem", title: "Screen viewing is paused", body: "I can't look at your screen while it is paused.", action: { label: "Turn it back on", run: () => togglePause(false) } },
         month_used: { kind: "problem", title: "You have used this month's help", body: "It refills on the 1st." },
-        free_used: { kind: "problem", title: `You have used your ${left} free fixes this month`, body: "They refill on the 1st. Pro gives you more, for $20 a month.", action: { label: "See plans", run: () => openDashboard().then(() => emitTo("dashboard", "dashboard-go", "account")) } },
+        free_used: { kind: "problem", title: `You have used your ${left} free fixes this month`, body: canBuy ? "They refill on the 1st. Pro gives you more, for $20 a month." : "They refill on the 1st.", action: canBuy ? { label: "See plans", run: () => openDashboard().then(() => emitTo("dashboard", "dashboard-go", "account")) } : undefined },
       };
       setCard(P[kind] ?? P.busy);
       show("home");
