@@ -7,8 +7,8 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { register, unregister } from "@tauri-apps/plugin-global-shortcut";
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useRef, useState } from "react";
-import { Session, type Mode, type Proposal, type Result } from "./agent";
-import { apLog, api, ApiError, autopilot, getEnv, getToken, hush, loadToken, openDashboard, overlayMode, placePanel, screenPaused, server, setScreenPaused, setToken, setUser, speak, track, type HistoryRow, type Me } from "./api";
+import { Session, type CommandAsk, type Mode, type Proposal, type Result } from "./agent";
+import { apLog, api, ApiError, autopilot, commandLog, getEnv, getToken, hush, loadToken, openDashboard, overlayMode, placePanel, screenPaused, server, setScreenPaused, setToken, setUser, speak, track, type CommandLog, type HistoryRow, type Me } from "./api";
 import { Bars, Bot } from "./bot";
 import { Mic, saidStop } from "./voice";
 import { Perms } from "./perms";
@@ -18,6 +18,7 @@ type Tab = Mode | "history";
 type Line = { who: "bot" | "me"; text: string };
 type Card =
   | { kind: "propose"; p: Proposal; teach: boolean }
+  | { kind: "command"; c: CommandAsk; details: boolean }
   | { kind: "ask"; question: string; options: string[] }
   | { kind: "done"; r: Result; why?: boolean }
   | { kind: "stopped" }
@@ -223,6 +224,23 @@ export function Panel() {
           resolve(ok);
         };
       }),
+    // One command that changes something: plain words up top, the command itself under Details.
+    command: (c: CommandAsk) =>
+      new Promise<boolean>((resolve) => {
+        say("bot", c.why);
+        setCard({ kind: "command", c, details: false });
+        speak(c.why, meRef.current?.settings);
+        overlayMode(false);
+        show("home");
+        approve.current = (ok) => {
+          approve.current = null;
+          setCard(null);
+          say("me", ok ? "Allow fix" : "Cancel");
+          if (!ok) say("bot", "Cancelled. That command did not run.");
+          resolve(ok);
+        };
+      }),
+    checked: (_what: string, report: string) => say("bot", report),
     ask: (question: string, options: string[]) =>
       new Promise<string>((resolve) => {
         say("bot", question);
@@ -312,7 +330,10 @@ export function Panel() {
     micOff();
     show("mini");
   }
+  const [commands, setCommands] = useState<CommandLog[]>([]);
+  const [showCommands, setShowCommands] = useState(false);
   async function loadHistory() {
+    setCommands(commandLog());
     setHistory(await api<HistoryRow[]>("/api/history").catch(() => []));
   }
   function summary(r: Result) {
@@ -347,7 +368,7 @@ export function Panel() {
       if (view === "perms" && os === "windows") once("perms", 3000, () => (localStorage.setItem("df_perms_ok", "1"), show("ready")));
       if (view === "ready") once("ready", 2500, () => show("home"));
       if (view === "home" && !card && !live.current) once("start", 3500, () => (setTab(kind === "teachdo" ? "teach" : (kind as Tab)), tabRef.current = kind === "teachdo" ? "teach" : (kind as Tab), heard(words)));
-      if (card?.kind === "propose") once(`propose${lines.length}`, 2500, () => approve.current?.(true));
+      if (card?.kind === "propose" || card?.kind === "command") once(`propose${lines.length}`, 2500, () => approve.current?.(true));
       if (card?.kind === "ask") once(`ask${lines.length}`, 2500, () => heard(card.options[0]));
       if (view === "pill" && needs && kind === "teachdo") once("doit", 1500, () => session.current?.doItForMe());
       if (card?.kind === "done") {
@@ -520,10 +541,20 @@ export function Panel() {
                       <p style={{ margin: "0 0 6px" }}>{h.outcome}</p>
                       {h.cause && <p style={{ margin: "0 0 6px" }}>Cause: {h.cause}</p>}
                       {h.steps?.length > 0 && <ol style={{ margin: 0, paddingLeft: 18 }}>{h.steps.map((s, i) => <li key={i}>{s}</li>)}</ol>}
+                      {h.commands && h.commands.length > 0 && <CommandList rows={h.commands} />}
                     </div>
                   )}
                 </div>
               ))}
+            </div>
+          )}
+          {commands.length > 0 && (
+            <div style={{ marginTop: 14 }}>
+              <button className="r cmdhead" onClick={() => setShowCommands(!showCommands)} aria-expanded={showCommands}>
+                <span className="mono">Commands run on this computer</span>
+                <span className="small">{commands.length}</span>
+              </button>
+              {showCommands && <CommandList rows={commands} dates />}
             </div>
           )}
           <div className="grow" />
@@ -549,6 +580,20 @@ export function Panel() {
                 {card.p.risk !== "low" && !card.teach && <p className="small warn" style={{ margin: "10px 0 0" }}>{card.p.risk === "high" ? "This changes something important. I will ask once more before that step." : "This changes more than a simple setting."}</p>}
                 <div className="row" style={{ marginTop: 14 }}>
                   <button className="btn primary" style={{ flex: 1 }} autoFocus onClick={() => approve.current?.(true)}>{card.teach ? "Start" : "Allow fix"}</button>
+                  <button className="btn" style={{ flex: 1 }} onClick={() => approve.current?.(false)}>Cancel</button>
+                </div>
+                <p className="small" style={{ margin: "10px 0 0" }}>Nothing changes until you allow it. Press Stop at any time.</p>
+              </div>
+            )}
+            {card?.kind === "command" && (
+              <div className="card" data-card="command">
+                <span className="mono">What I will change</span>
+                <p style={{ margin: "8px 0 0", fontSize: 17, lineHeight: "24px" }}>{card.c.why}</p>
+                {card.c.undo && <p className="small" style={{ margin: "8px 0 0" }}>{card.c.undo}</p>}
+                <button className="link" style={{ padding: "8px 0 0" }} onClick={() => setCard({ ...card, details: !card.details })} aria-expanded={card.details}>{card.details ? "Hide details" : "Details"}</button>
+                {card.details && <pre className="cmd" aria-label="The exact command">{card.c.command}</pre>}
+                <div className="row" style={{ marginTop: 14 }}>
+                  <button className="btn primary" style={{ flex: 1 }} autoFocus onClick={() => approve.current?.(true)}>Allow fix</button>
                   <button className="btn" style={{ flex: 1 }} onClick={() => approve.current?.(false)}>Cancel</button>
                 </div>
                 <p className="small" style={{ margin: "10px 0 0" }}>Nothing changes until you allow it. Press Stop at any time.</p>
@@ -625,6 +670,24 @@ export function Panel() {
 }
 
 // Every setup step has a visible Back that keeps what was entered.
+/** Commands shown in History: plain words first, the command itself in small print. */
+function CommandList({ rows, dates = false }: { rows: CommandLog[]; dates?: boolean }) {
+  return (
+    <ul className="cmds" aria-label="Commands">
+      {rows.map((c, i) => (
+        <li key={c.at + i}>
+          <span>
+            {dates && <span className="d">{new Date(c.at).toLocaleDateString(undefined, { month: "short", day: "numeric" })} </span>}
+            {c.why}
+            <span className={`tag ${c.approved ? "" : "quiet"}`} style={{ marginLeft: 8 }}>{!c.approved ? "Read only" : c.ok ? "Allowed" : "Did not finish"}</span>
+          </span>
+          <code>{c.command}</code>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 const Back = ({ onClick }: { onClick: () => void }) => (
   <button type="button" className="link back" onClick={onClick} aria-label="Back">
     ← Back

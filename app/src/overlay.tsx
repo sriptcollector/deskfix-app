@@ -1,12 +1,22 @@
-// The see-through layer over the whole screen. It shows the character moving to where it acts, its
-// speech bubbles, the Teach me highlight, and the "Yes, do it" card for higher-risk steps.
-// It never takes clicks except while a Yes card is up.
+// The see-through layer over the whole screen. It shows the DeskFix cursor (its own pointer, clearly not
+// the person's: a dark arrow with a DeskFix tag and the little face riding along) gliding to each spot
+// before the assistant presses or types there, with a short label ("Opening Settings"), its speech
+// bubbles, the Teach me highlight, and the "Yes, do it" card for higher-risk steps.
+// It never takes clicks except while a Yes card is up. Stop freezes the cursor where it is.
 import { emitTo, listen } from "@tauri-apps/api/event";
 import { useEffect, useRef, useState } from "react";
 import { Bot, type Expr } from "./bot";
 import { autopilot } from "./api";
 
 const BOT = 36;
+/** The DeskFix pointer: a dark arrow with a light outline so it reads on any background, tip at (0,0). */
+function Arrow() {
+  return (
+    <svg className="arrow" viewBox="0 0 24 28" width="26" height="30" aria-hidden="true">
+      <path d="M2 1.5 L2 21 L7.2 16.2 L10.6 24.5 L14.6 22.8 L11.3 14.8 L18.5 14.8 Z" fill="var(--ink)" stroke="var(--bg)" strokeWidth="1.6" strokeLinejoin="round" />
+    </svg>
+  );
+}
 // A drawn picture of the system box the person will meet next, shown on the Yes card so they know which button is safe.
 function guideKind(detail: string): "uac" | "automation" | null {
   if (/windows will (also )?ask|do you want to allow this app/i.test(detail)) return "uac";
@@ -52,6 +62,8 @@ export function Overlay() {
   const [point, setPoint] = useState<[number, number] | null>(null);
   const [card, setCard] = useState<{ x: number; y: number; title: string; detail: string; undoable: boolean } | null>(null);
   const [textSize, setTextSize] = useState(17);
+  const [label, setLabel] = useState<string | null>(null);
+  const [frozen, setFrozen] = useState(false);
   const botRef = useRef<HTMLDivElement>(null);
   // Screen points -> this window's CSS pixels (differs when the computer zooms text, e.g. Windows Text size).
   const fRef = useRef(1);
@@ -63,12 +75,20 @@ export function Overlay() {
       listen<{ mode: string }>("ov:mode", (e) => {
         setOn(e.payload.mode !== "off");
         setSay(null);
+        setLabel(null);
         setPoint(null);
         setCard(null);
+        setFrozen(false);
+        if (e.payload.mode === "off") freeze();
       }),
+      listen<{ text: string | null }>("ov:label", (e) => setLabel(e.payload.text)),
       listen<{ sw: number; sh: number }>("ov:screen", (e) => (fRef.current = innerWidth / e.payload.sw || 1)),
       listen<{ x: number; y: number; ms: number }>("ov:fly", (e) => fly(F(e.payload.x), F(e.payload.y), e.payload.ms)),
-      listen<{ expr: Expr }>("ov:expr", (e) => setExpr(e.payload.expr)),
+      listen<{ expr: Expr }>("ov:expr", (e) => {
+        setExpr(e.payload.expr);
+        // Stop: the cursor halts where it is, this instant.
+        if (e.payload.expr === "stopped") (freeze(), setFrozen(true), setLabel(null));
+      }),
       listen<{ text: string | null }>("ov:say", (e) => setSay(e.payload.text)),
       listen<{ x: number; y: number }>("ov:press", (e) => {
         const id = Math.random();
@@ -85,11 +105,26 @@ export function Overlay() {
     return () => un.forEach((p) => p.then((f) => f()));
   }, []);
 
-  // Flight on a gentle arc; the bot's top-left sits 4 px down-right of the target.
+  /** Halts a flight mid-air and keeps the cursor where it got to. */
+  function freeze() {
+    const el = botRef.current;
+    if (!el) return;
+    for (const a of el.getAnimations()) {
+      try {
+        a.commitStyles();
+      } catch {}
+      a.cancel();
+    }
+    const m = new DOMMatrix(getComputedStyle(el).transform);
+    posRef.current = [m.e, m.f];
+    setPos([m.e, m.f]);
+  }
+
+  // Flight on a gentle arc; the arrow's tip lands exactly on the target.
   function fly(tx: number, ty: number, ms: number) {
     const el = botRef.current;
     const [sx, sy] = posRef.current;
-    const ex = tx + 4, ey = ty + 4;
+    const ex = tx, ey = ty;
     const dx = ex - sx, dy = ey - sy;
     const dist = Math.hypot(dx, dy);
     posRef.current = [ex, ey];
@@ -116,9 +151,9 @@ export function Overlay() {
     emitTo("panel", "ov:answer", { yes });
   };
 
-  // Bubble: above-right of the bot, flipped to whichever side has room.
-  const bx = pos[0] + BOT + 8 > innerWidth - 300 ? pos[0] - 296 : pos[0] + BOT + 8;
-  const by = pos[1] - 64 < 8 ? pos[1] + BOT + 8 : pos[1] - 64;
+  // Bubble: above-right of the cursor, flipped to whichever side has room.
+  const bx = pos[0] + BOT + 30 > innerWidth - 300 ? pos[0] - 296 : pos[0] + BOT + 30;
+  const by = pos[1] - 64 < 8 ? pos[1] + BOT + 40 : pos[1] - 64;
 
   if (!on) return <div className="overlay" />;
   return (
@@ -126,8 +161,13 @@ export function Overlay() {
       {point && <span className="ring" style={{ left: point[0], top: point[1] }} />}
       {card && <span className="target" style={{ left: card.x, top: card.y }} />}
       {ripples.map((r) => <span key={r.id} className="ripple" style={{ left: r.x, top: r.y }} />)}
-      <div ref={botRef} className="bot" style={{ transform: `translate(${pos[0]}px, ${pos[1]}px)` }}>
-        <Bot expr={expr} />
+      <div ref={botRef} className={`dfcursor${frozen ? " frozen" : ""}`} style={{ transform: `translate(${pos[0]}px, ${pos[1]}px)` }} role="img" aria-label={`DeskFix cursor${label ? `: ${label}` : ""}`}>
+        <Arrow />
+        <span className="who">DeskFix</span>
+        <div className="bot">
+          <Bot expr={expr} />
+        </div>
+        {label && <div className="label">{label}</div>}
       </div>
       {say && !card && <div className="bubble" style={{ left: bx, top: by }} aria-live="polite">{say}</div>}
       {card && (

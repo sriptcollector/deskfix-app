@@ -9,11 +9,13 @@ use serde::Deserialize;
 #[serde(tag = "do", rename_all = "snake_case")]
 pub enum Action {
     Move { x: f64, y: f64 },
-    Click { x: Option<f64>, y: Option<f64>, button: Option<String>, count: Option<u32>, modifiers: Option<String> },
+    /// `soft`: try pressing the control through the OS (no pointer move) first. `restore`: after a real
+    /// click, put the person's pointer back where it was (the DeskFix cursor on the overlay showed the spot).
+    Click { x: Option<f64>, y: Option<f64>, button: Option<String>, count: Option<u32>, modifiers: Option<String>, soft: Option<bool>, restore: Option<bool> },
     Down,
     Up,
-    Drag { from: (f64, f64), to: (f64, f64) },
-    Scroll { x: Option<f64>, y: Option<f64>, direction: String, amount: Option<i32> },
+    Drag { from: (f64, f64), to: (f64, f64), restore: Option<bool> },
+    Scroll { x: Option<f64>, y: Option<f64>, direction: String, amount: Option<i32>, restore: Option<bool> },
     Type { text: String },
     Key { combo: String, repeat: Option<u32> },
 }
@@ -124,8 +126,9 @@ fn on_main<T: Send + 'static>(app: &tauri::AppHandle, f: impl FnOnce() -> T + Se
     }
 }
 
+/// Returns a short word about how it was done ("soft ...", "ok") for the app's log.
 #[tauri::command]
-pub async fn act(app: tauri::AppHandle, action: Action) -> Result<(), String> {
+pub async fn act(app: tauri::AppHandle, action: Action) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || match action {
         Action::Type { text } if text.chars().count() <= 120 => {
             guard_text(&text)?;
@@ -133,7 +136,17 @@ pub async fn act(app: tauri::AppHandle, action: Action) -> Result<(), String> {
                 on_main(&app, move || run(Action::Type { text: c.to_string() }))??;
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
-            Ok(())
+            Ok("ok".into())
+        }
+        // A soft press talks to the OS accessibility layer; on Windows that wants its own thread, not the UI one.
+        Action::Click { x: Some(x), y: Some(y), button, count, modifiers, soft: Some(true), restore } if button.as_deref().unwrap_or("left") == "left" && count.unwrap_or(1) == 1 && modifiers.as_deref().unwrap_or("").is_empty() => {
+            match crate::soft::press(x, y) {
+                Ok(what) => Ok(format!("soft {what}")),
+                Err(why) => {
+                    eprintln!("[soft] fell back to a real click: {why}");
+                    on_main(&app, move || run(Action::Click { x: Some(x), y: Some(y), button, count, modifiers, soft: None, restore }))?
+                }
+            }
         }
         other => on_main(&app, move || run(other))?,
     })
@@ -141,15 +154,28 @@ pub async fn act(app: tauri::AppHandle, action: Action) -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
-fn run(action: Action) -> Result<(), String> {
+/// Where the pointer is now, so a real click can put it back after (the person keeps their mouse).
+fn remember(e: &mut Enigo, restore: Option<bool>) -> Option<(i32, i32)> {
+    if restore.unwrap_or(false) { e.location().ok() } else { None }
+}
+fn put_back(e: &mut Enigo, at: Option<(i32, i32)>) {
+    if let Some((x, y)) = at {
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let _ = e.move_mouse(x, y, Coordinate::Abs);
+    }
+}
+
+fn run(action: Action) -> Result<String, String> {
     let mut e = Enigo::new(&Settings::default()).map_err(|x| x.to_string())?;
     let err = |x: enigo::InputError| x.to_string();
+    let ok = |r: Result<(), String>| r.map(|_| "ok".to_string());
     match action {
         Action::Move { x, y } => {
             let (nx, ny) = to_native(x, y);
-            e.move_mouse(nx, ny, Coordinate::Abs).map_err(err)
+            ok(e.move_mouse(nx, ny, Coordinate::Abs).map_err(err))
         }
-        Action::Click { x, y, button, count, modifiers } => {
+        Action::Click { x, y, button, count, modifiers, restore, .. } => {
+            let back = remember(&mut e, restore);
             if let (Some(x), Some(y)) = (x, y) {
                 let (nx, ny) = to_native(x, y);
                 e.move_mouse(nx, ny, Coordinate::Abs).map_err(err)?;
@@ -160,7 +186,7 @@ fn run(action: Action) -> Result<(), String> {
                 Some("middle") => Button::Middle,
                 _ => Button::Left,
             };
-            with_mods(&mut e, &modifiers, |e| {
+            let r = with_mods(&mut e, &modifiers, |e| {
                 for i in 0..count.unwrap_or(1).clamp(1, 3) {
                     if i > 0 {
                         std::thread::sleep(std::time::Duration::from_millis(60));
@@ -171,11 +197,14 @@ fn run(action: Action) -> Result<(), String> {
                     e.button(b, Direction::Release).map_err(|x| x.to_string())?;
                 }
                 Ok(())
-            })
+            });
+            put_back(&mut e, back);
+            ok(r)
         }
-        Action::Down => e.button(Button::Left, Direction::Press).map_err(err),
-        Action::Up => e.button(Button::Left, Direction::Release).map_err(err),
-        Action::Drag { from, to } => {
+        Action::Down => ok(e.button(Button::Left, Direction::Press).map_err(err)),
+        Action::Up => ok(e.button(Button::Left, Direction::Release).map_err(err)),
+        Action::Drag { from, to, restore } => {
+            let back = remember(&mut e, restore);
             let (fx, fy) = to_native(from.0, from.1);
             let (tx, ty) = to_native(to.0, to.1);
             e.move_mouse(fx, fy, Coordinate::Abs).map_err(err)?;
@@ -185,26 +214,31 @@ fn run(action: Action) -> Result<(), String> {
                 let _ = e.move_mouse(fx + ((tx - fx) as f64 * k) as i32, fy + ((ty - fy) as f64 * k) as i32, Coordinate::Abs);
                 std::thread::sleep(std::time::Duration::from_millis(25));
             }
-            e.button(Button::Left, Direction::Release).map_err(err)
+            let r = e.button(Button::Left, Direction::Release).map_err(err);
+            put_back(&mut e, back);
+            ok(r)
         }
-        Action::Scroll { x, y, direction, amount } => {
+        Action::Scroll { x, y, direction, amount, restore } => {
+            let back = remember(&mut e, restore);
             if let (Some(x), Some(y)) = (x, y) {
                 let (nx, ny) = to_native(x, y);
                 e.move_mouse(nx, ny, Coordinate::Abs).map_err(err)?;
             }
             let n = amount.unwrap_or(3).clamp(1, 30);
-            match direction.as_str() {
+            let r = match direction.as_str() {
                 "up" => e.scroll(-n, Axis::Vertical),
                 "down" => e.scroll(n, Axis::Vertical),
                 "left" => e.scroll(-n, Axis::Horizontal),
                 _ => e.scroll(n, Axis::Horizontal),
             }
-            .map_err(err)
+            .map_err(err);
+            put_back(&mut e, back);
+            ok(r)
         }
         Action::Type { text } => {
             guard_text(&text)?;
             // Short text arrives one letter at a time from `act` (about 20 a second, so the person can follow).
-            e.text(&text).map_err(err)
+            ok(e.text(&text).map_err(err))
         }
         Action::Key { combo, repeat } => {
             let parts: Vec<&str> = combo.split('+').collect();
@@ -215,7 +249,7 @@ fn run(action: Action) -> Result<(), String> {
                 with_mods(&mut e, &mods, |e| e.key(k, Direction::Click).map_err(|x| x.to_string()))?;
                 std::thread::sleep(std::time::Duration::from_millis(30));
             }
-            Ok(())
+            Ok("ok".into())
         }
     }
 }
