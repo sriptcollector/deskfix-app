@@ -135,7 +135,7 @@ export function Overlay() {
           <h2>{card.title}</h2>
           {card.detail && <div className="detail">{card.detail}</div>}
           {guideKind(card.detail) && <GuidePic kind={guideKind(card.detail)!} />}
-          <p className="small" style={{ margin: "0 0 14px" }}>{card.undoable ? "You can get it back." : "This can't be undone."}</p>
+          <p className="small" style={{ margin: "0 0 14px" }}>{card.undoable ? "You can get it back." : "I can't take this back. Are you sure?"}</p>
           <button className="btn primary full" autoFocus onClick={() => answer(true)}>Yes, do it</button>
           <button className="btn full" style={{ marginTop: 8 }} onClick={() => answer(false)}>No, don't</button>
         </div>

@@ -38,7 +38,7 @@ jobs:
       max-parallel: 12
       matrix:
         os: ${{ fromJSON(inputs.os != '' && inputs.os || '["macos-latest","windows-latest"]') }}
-        task: ${{ fromJSON(inputs.tasks != '' && inputs.tasks || '["text","printer","sheet","broken","showme","teachdo","safe","scam","website","zoom","dark","pointer","sound","sleep","clock","scroll","wallpaper","screenshot","folder","note","slow","storage"]') }}
+        task: ${{ fromJSON(inputs.tasks != '' && inputs.tasks || '["text","printer","sheet","broken","showme","teachdo","safe","scam","website","zoom","dark","pointer","sound","sleep","clock","scroll","wallpaper","screenshot","folder","note","slow","storage","wifi","frozen","fulldisk"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -68,6 +68,9 @@ jobs:
             note) AP="teach:Show me how to write a note and save it";;
             slow) AP="chat:My computer feels slow. What is using it right now?";;
             storage) AP="chat:How much free space does my computer have?";;
+            wifi) AP="fix:My Wi-Fi keeps dropping out";;
+            frozen) AP="fix:My notes program is frozen and will not respond";;
+            fulldisk) AP="fix:My computer says the disk is full";;
           esac
           echo "AP=$AP" >> $GITHUB_ENV
           mkdir -p shots
@@ -110,6 +113,7 @@ jobs:
               Get-CimInstance Win32_Printer -Filter "Name='HP DeskJet 2700'" | Invoke-CimMethod -MethodName Pause | Out-Null
               Get-Printer | Format-Table Name, DriverName, PrinterStatus -AutoSize
             }
+            "frozen" { Start-Process powershell -ArgumentList '-NoProfile','-Command','Add-Type -AssemblyName System.Windows.Forms; $f=New-Object Windows.Forms.Form; $f.Text="Notes"; $f.Add_Shown({Start-Sleep 600}); [Windows.Forms.Application]::Run($f)'; Start-Sleep 4 }
             "sound" { (New-Object -ComObject WScript.Shell).SendKeys([string][char]173) }
           }
       - name: Ask for help (Windows)
@@ -174,6 +178,7 @@ jobs:
             safe) (nohup "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --no-first-run --no-default-browser-check "https://example.com" >/dev/null 2>&1 &) ; sleep 10;;
             scam) (nohup "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --no-first-run --no-default-browser-check "file://$PWD/scam.html" >/dev/null 2>&1 &) ; sleep 10;;
             website|zoom) (nohup "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --no-first-run --no-default-browser-check "https://en.wikipedia.org/wiki/Main_Page" >/dev/null 2>&1 &) ; sleep 10;;
+            frozen) open -a TextEdit; sleep 3; pkill -STOP TextEdit || true;;
             sound) osascript -e 'set volume with output muted';;
             printer) sudo lpadmin -p HP_DeskJet_2700 -D "HP DeskJet 2700" -E -v ipp://10.0.0.99/ipp/print -m drv:///sample.drv/generic.ppd && sudo cupsdisable HP_DeskJet_2700 && lpstat -p;;
           esac

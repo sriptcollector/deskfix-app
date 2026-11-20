@@ -279,7 +279,7 @@ export function Panel() {
       const canBuy = meRef.current?.checkout !== false;
       const P: Record<string, Card> = {
         offline: { kind: "problem", title: "The internet dropped for a moment", body: "Check your Wi-Fi, then try again." },
-        busy: { kind: "problem", title: "I can't think right now", body: "Try again in a minute." },
+        busy: { kind: "problem", title: "I can't help right now", body: "Try again in a minute." },
         cap: { kind: "problem", title: "This one is taking too long", body: "Ask again in a simpler way, or copy a summary for a person to help." },
         paused: { kind: "problem", title: "Screen viewing is paused", body: "I can't look at your screen while it is paused.", action: { label: "Turn it back on", run: () => togglePause(false) } },
         month_used: { kind: "problem", title: "You have used this month's help", body: "It refills on the 1st." },
@@ -393,7 +393,7 @@ export function Panel() {
         {steps(1)}
         <div className="body center">
           <Bot expr="idle" size={64} />
-          <h1>Computer problems? Let AI fix them</h1>
+          <h1>Computer problems? I can help fix them</h1>
           <p className="small">Free to start: 5 fixes a month. No card.</p>
           <div className="grow" />
           <button className="btn primary full" autoFocus onClick={() => show("signin")}>Create account</button>
@@ -587,7 +587,7 @@ export function Panel() {
             )}
             {card?.kind === "stopped" && (
               <div className="card">
-                <h2>Stopped. Nothing else will happen</h2>
+                <h2>Stopped. Nothing more was changed</h2>
                 <div className="chips" style={{ marginTop: 12 }}>
                   <button className="chip rec" autoFocus onClick={() => (setCard(null), setThinking(true), session.current!.more("Keep going from where things are now. Take a screenshot first.").finally(() => setThinking(false)))}>Keep going</button>
                   {session.current?.journal.some((j) => j.did) && <button className="chip" onClick={() => (setCard(null), setThinking(true), session.current!.more(session.current!.undoPrompt()).finally(() => setThinking(false)))}>Undo what you did</button>}
