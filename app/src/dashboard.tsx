@@ -208,10 +208,10 @@ export function Dashboard() {
             {me.plan === "free" && !me.payer && (me.guest ? (
               <div className="plan">
                 <span className="mono">You are a guest</span>
-                <p style={{ margin: "8px 0 14px" }}>Create an account to keep your history and to get more fixes. It takes a minute. No password.</p>
+                <p style={{ margin: "8px 0 14px" }}>Create an account to keep your history if you change computers. It takes a minute. No password.</p>
                 <button className="btn primary" onClick={() => openAssistant("signin")}>Create account</button>
               </div>
-            ) : (
+            ) : me.checkout !== false && (
               <>
                 <div className="plan">
                   <span className="mono">Pro · most people pick this</span>

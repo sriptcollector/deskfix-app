@@ -21,6 +21,7 @@ export type Me = {
   members: string[];
   canUse: boolean;
   why: "free_used" | "month_used" | null;
+  checkout?: boolean; // false: plans cannot be bought now, so no upgrade button is shown
   fixes: { used: number; limit: number | null; left: number | null };
   settings: Settings;
   memories: string[];
