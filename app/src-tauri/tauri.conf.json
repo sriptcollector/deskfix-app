@@ -1,0 +1,94 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "DeskFix",
+  "mainBinaryName": "deskfix",
+  "version": "1.0.0",
+  "identifier": "com.trydeskfix.app",
+  "build": {
+    "beforeDevCommand": "bun run dev",
+    "devUrl": "http://localhost:5175",
+    "beforeBuildCommand": "bun run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "label": "panel",
+        "acceptFirstMouse": true,
+        "url": "index.html?view=panel",
+        "title": "DeskFix",
+        "width": 380,
+        "height": 560,
+        "center": true,
+        "decorations": false,
+        "transparent": true,
+        "resizable": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": false,
+        "shadow": true
+      },
+      {
+        "label": "overlay",
+        "url": "index.html?view=overlay",
+        "title": "DeskFix assistant",
+        "width": 800,
+        "height": 600,
+        "decorations": false,
+        "transparent": true,
+        "resizable": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": false,
+        "focus": false,
+        "shadow": false,
+        "visibleOnAllWorkspaces": true
+      },
+      {
+        "label": "dashboard",
+        "url": "index.html?view=dashboard",
+        "title": "DeskFix",
+        "width": 960,
+        "height": 640,
+        "minWidth": 720,
+        "minHeight": 480,
+        "center": true,
+        "resizable": true,
+        "visible": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob: mediastream:; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost https://api.trydeskfix.com https://api-staging.trydeskfix.com https://*.run.app"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "app", "dmg"],
+    "publisher": "Westward",
+    "homepage": "https://trydeskfix.com",
+    "category": "Utility",
+    "shortDescription": "DeskFix: AI that sees your screen, fixes computer problems, and teaches you",
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
+    "macOS": {
+      "minimumSystemVersion": "12.0",
+      "signingIdentity": "-",
+      "infoPlist": "Info.plist"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "displayLanguageSelector": false
+      }
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQ2MTU4NDdGMkYyMEFDNTkKUldSWnJDQXZmNFFWMWkyZ2V5b3YzT2lYQmdYaG0xaUdoYnIycVZncWFlcG5YZHNyK2hObjVYYkoK",
+      "endpoints": ["https://github.com/sriptcollector/deskfix-app/releases/latest/download/latest.json"],
+      "windows": { "installMode": "quiet" }
+    }
+  }
+}

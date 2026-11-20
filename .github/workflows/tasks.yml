@@ -1,0 +1,227 @@
+name: Task test
+# Real Fix, Teach and Chat tasks on fresh Mac and Windows VMs, one VM per task: install with the
+# one-line installer, sign in to a new Free test account on staging, then ask for help like a
+# person would. With `model`, the same set measures one model setup (success and cost per task). A scripted person presses only what a person would press (the helper does the work).
+# Screenshots every 2 s and the helper's step log go to a "tasks-<run>" pre-release.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to install (test = the newest test build)
+        required: true
+        default: test
+      model:
+        description: 'Model setup to measure: one model id, or two with a comma (every step, hard steps). Empty = the server default'
+        required: false
+        default: ''
+      os:
+        description: 'Optional JSON list of runners, e.g. ["windows-latest"] (default: Mac and Windows)'
+        required: false
+        default: ''
+      tasks:
+        description: 'Optional JSON list of tasks, e.g. ["text"] (default: all; all)'
+        required: false
+        default: ''
+      record:
+        description: 'Also record a 15 fps screen video on Windows (for site footage)'
+        required: false
+        default: 'false'
+permissions:
+  contents: write
+env:
+  STAGING: ${{ vars.DF_STAGING }}
+  DF_DOWNLOADS: https://github.com/${{ github.repository }}/releases/download/${{ inputs.tag }}
+jobs:
+  task:
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix:
+        os: ${{ fromJSON(inputs.os != '' && inputs.os || '["macos-latest","windows-latest"]') }}
+        task: ${{ fromJSON(inputs.tasks != '' && inputs.tasks || '["text","printer","sheet","broken","showme","teachdo","safe","scam","website","zoom","dark","pointer","sound","sleep","clock","scroll","wallpaper","screenshot","folder","note","slow","storage"]') }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - name: Pick the task
+        shell: bash
+        run: |
+          case "${{ matrix.task }}" in
+            text) AP="fix:Make my text bigger";;
+            printer) AP="fix:My printer is offline";;
+            sheet) AP="teach:Show me how to make a spreadsheet";;
+            broken) AP="fix:The words in this window are way too small. I can't read my list.";;
+            showme) AP="teach:Show me how to make the text on my screen bigger";;
+            teachdo) AP="teachdo:Show me how to make the text on my screen bigger";;
+            safe) AP="chat:Is this site safe?";;
+            scam) AP="chat:Is this pop-up a scam?";;
+            website) AP="teach:I don't know how to use this website. I want to read about the Moon.";;
+            zoom) AP="teach:Show me how to make this web page bigger";;
+            dark) AP="fix:Turn on dark mode";;
+            pointer) AP="fix:My mouse pointer is too small. I keep losing it.";;
+            sound) AP="fix:I can't hear any sound";;
+            sleep) AP="fix:My screen turns off too fast. Make it stay on for 15 minutes.";;
+            clock) AP="fix:Show the clock in 24-hour time";;
+            scroll) AP="fix:My mouse moves too slowly. Make the pointer faster.";;
+            wallpaper) AP="fix:Change my desktop background to a plain dark color";;
+            screenshot) AP="teach:Show me how to take a picture of my screen";;
+            folder) AP="teach:Show me how to make a new folder on my desktop";;
+            note) AP="teach:Show me how to write a note and save it";;
+            slow) AP="chat:My computer feels slow. What is using it right now?";;
+            storage) AP="chat:How much free space does my computer have?";;
+          esac
+          echo "AP=$AP" >> $GITHUB_ENV
+          mkdir -p shots
+          cat > scam.html <<'EOS'
+          <!doctype html><title>Windows Security Alert</title><body style="background:#0a3d91;color:#fff;font:20px sans-serif;text-align:center;padding:60px">
+          <h1>&#9888; YOUR COMPUTER IS INFECTED</h1><p>Your files and bank details are at risk. Do not close this window.</p>
+          <p style="font-size:28px">Call Microsoft Support now: <b>1-888-555-0199</b></p><p>Error code: 0x80070424 &middot; Download the cleaner below</p><button style="font-size:22px;padding:12px 24px">Download Cleaner</button></body>
+          EOS
+
+      # ---------------- Windows ----------------
+      - name: Install like a customer (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          irm "$env:STAGING/install.ps1" | iex
+          Start-Sleep 8; Get-Process deskfix -ErrorAction SilentlyContinue | Stop-Process -Force
+      - name: Set the scene (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          # The runner's own console windows fill the screen in every screenshot. Minimize them first,
+          # so the footage shows only what a customer would see.
+          Add-Type -Name Win -Namespace U -MemberDefinition '[DllImport("user32.dll")] public static extern bool ShowWindow(System.IntPtr h, int c);'
+          Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and $_.ProcessName -match '^(conhost|WindowsTerminal|OpenConsole|powershell|pwsh|cmd|Runner\.|provisioner)' } | ForEach-Object { [U.Win]::ShowWindow($_.MainWindowHandle, 6) | Out-Null }
+          Get-Process msedge -ErrorAction SilentlyContinue | Stop-Process -Force
+          New-Item -Force 'HKLM:\SOFTWARE\Policies\Microsoft\Edge' | Out-Null
+          Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Edge' -Name HideFirstRunExperience -Value 1 -Type DWord
+          $chrome = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+          $flags = @('--no-first-run', '--no-default-browser-check')
+          switch -Wildcard ("${{ matrix.task }}") {
+            "broken" { Set-Content "$env:TEMP\Grocery list.txt" "Milk`r`nEggs`r`nBread`r`nCall the pharmacy about the refill"; Start-Process notepad "$env:TEMP\Grocery list.txt"; Start-Sleep 3; Add-Type -AssemblyName System.Windows.Forms; 1..6 | % { [System.Windows.Forms.SendKeys]::SendWait('^{SUBTRACT}'); Start-Sleep -Milliseconds 200 } }
+            "safe" { Start-Process $chrome -ArgumentList ($flags + 'https://example.com'); Start-Sleep 8 }
+            "scam" { $u = "file:///" + ((Resolve-Path scam.html).Path -replace '\\', '/'); Start-Process $chrome -ArgumentList ($flags + $u); Start-Sleep 8 }
+            { $_ -in "website","zoom" } { Start-Process $chrome -ArgumentList ($flags + 'https://en.wikipedia.org/wiki/Main_Page'); Start-Sleep 8 }
+            "printer" {
+              Add-PrinterDriver -Name "Generic / Text Only" -ErrorAction SilentlyContinue
+              Add-PrinterPort -Name "IP_10.0.0.99" -PrinterHostAddress "10.0.0.99" -ErrorAction SilentlyContinue
+              Add-Printer -Name "HP DeskJet 2700" -DriverName "Generic / Text Only" -PortName "IP_10.0.0.99"
+              Start-Sleep 2
+              Get-CimInstance Win32_Printer -Filter "Name='HP DeskJet 2700'" | Invoke-CimMethod -MethodName Pause | Out-Null
+              Get-Printer | Format-Table Name, DriverName, PrinterStatus -AutoSize
+            }
+            "sound" { (New-Object -ComObject WScript.Shell).SendKeys([string][char]173) }
+          }
+      - name: Ask for help (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        env:
+          TEST_LOGIN: ${{ secrets.DF_STAGING_TEST_LOGIN }}
+        run: |
+          $n = "${{ github.run_number }}" + "${{ strategy.job-index }}" + "7"
+          $r = Invoke-RestMethod -Method Post -Uri "$env:STAGING/auth/test?n=$n" -Headers @{ 'x-test-login' = $env:TEST_LOGIN }
+          $env:DESKFIX_TEST_SESSION = $r.token
+          $h = @{ authorization = "Bearer $($r.token)"; 'content-type' = 'application/json' }
+          $env:DESKFIX_SERVER = $env:STAGING
+          $env:DESKFIX_SHOW_IN_CAPTURE = '1'
+          if ('${{ inputs.model }}') { $env:DESKFIX_MODEL = '${{ inputs.model }}' }
+          $env:DESKFIX_AUTOPILOT = $env:AP
+          $env:DESKFIX_AUTOPILOT_LOG = "$PWD\shots\task.log"
+          @'
+          Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+          $i = 0
+          while ($true) { $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds; $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+            [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size); $bmp.Save(("shots\shot-{0:D3}.png" -f $i)); $bmp.Dispose(); $i++; Start-Sleep -Milliseconds 2000 }
+          '@ | Set-Content shoot.ps1
+          $shooter = Start-Process powershell -ArgumentList '-NoProfile','-File','shoot.ps1' -PassThru -WindowStyle Hidden
+          $rec = $null
+          if ("${{ inputs.record }}" -eq 'true') {
+            if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) { choco install ffmpeg -y --no-progress | Out-Null; $env:Path += ";C:\ProgramData\chocolatey\bin" }
+            # Matroska survives a hard stop, so the video is whole even when the process is killed.
+            $rec = Start-Process ffmpeg -ArgumentList '-y','-f','gdigrab','-framerate','15','-draw_mouse','1','-i','desktop','-c:v','libx264','-preset','veryfast','-crf','20','-pix_fmt','yuv420p','-f','matroska','shots\screen.mkv' -PassThru -WindowStyle Hidden
+            Start-Sleep 2
+          }
+          $app = Start-Process "$env:LOCALAPPDATA\DeskFix\deskfix.exe" -PassThru
+          $deadline = (Get-Date).AddMinutes(12)
+          while ((Get-Date) -lt $deadline) { Start-Sleep 3; if ((Test-Path $env:DESKFIX_AUTOPILOT_LOG) -and (Select-String -Path $env:DESKFIX_AUTOPILOT_LOG -Pattern 'DONE|PROBLEM|STOPPED' -Quiet)) { Start-Sleep 8; break } }
+          Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue; Stop-Process -Id $shooter.Id -Force -ErrorAction SilentlyContinue
+          if ($rec) { Get-Process ffmpeg -ErrorAction SilentlyContinue | Stop-Process -Force; Start-Sleep 2 } # choco ffmpeg is a shim: stop the real process too
+          try { Invoke-WebRequest -UseBasicParsing -Uri "$env:STAGING/api/history" -Headers @{ authorization = "Bearer $($r.token)" } -OutFile shots\history.json } catch {}
+          try { Invoke-RestMethod -Method Post -Uri "$env:STAGING/api/account/delete" -Headers @{ authorization = "Bearer $($r.token)"; "content-type" = "application/json" } -Body '{"confirm":"delete"}' | Out-Null } catch {}
+          if (Test-Path $env:DESKFIX_AUTOPILOT_LOG) { Get-Content $env:DESKFIX_AUTOPILOT_LOG | Select-String 'DONE|PROBLEM|STOPPED|tool error' }
+
+      # ---------------- Mac ----------------
+      - name: Install like a customer (Mac)
+        if: runner.os == 'macOS'
+        run: |
+          curl -fsSL "$STAGING/install.sh" | sh
+          sleep 6; pkill -f "DeskFix.app/Contents/MacOS" || true
+          APP=/Applications/"DeskFix.app"; [ -d "$APP" ] || APP="$HOME/Applications/DeskFix.app"
+          echo "APP=$APP" >> $GITHUB_ENV
+          BIN="$APP/Contents/MacOS/deskfix"
+          for db in "$HOME/Library/Application Support/com.apple.TCC/TCC.db" "/Library/Application Support/com.apple.TCC/TCC.db"; do
+            for svc in kTCCServiceScreenCapture kTCCServiceAccessibility kTCCServiceMicrophone kTCCServicePostEvent; do
+              sudo sqlite3 "$db" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version,flags) VALUES ('$svc','com.trydeskfix.app',0,2,4,1,0);" 2>&1 || true
+              sudo sqlite3 "$db" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version,flags) VALUES ('$svc','$BIN',1,2,4,1,0);" 2>&1 || true
+            done
+          done
+          defaults write "$HOME/Library/Group Containers/group.com.apple.replayd/ScreenCaptureApprovals" "$BIN" -date "3024-01-01 00:00:00 +0000" || true
+      - name: Set the scene (Mac)
+        if: runner.os == 'macOS'
+        run: |
+          case "${{ matrix.task }}" in
+            broken) printf '{\\rtf1\\ansi{\\fonttbl\\f0 Helvetica;}\\f0\\fs6 Milk\\par Eggs\\par Bread\\par Call the pharmacy about the refill}' > "$HOME/Desktop/Grocery list.rtf"; open -a TextEdit "$HOME/Desktop/Grocery list.rtf"; sleep 4;;
+            safe) (nohup "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --no-first-run --no-default-browser-check "https://example.com" >/dev/null 2>&1 &) ; sleep 10;;
+            scam) (nohup "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --no-first-run --no-default-browser-check "file://$PWD/scam.html" >/dev/null 2>&1 &) ; sleep 10;;
+            website|zoom) (nohup "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --no-first-run --no-default-browser-check "https://en.wikipedia.org/wiki/Main_Page" >/dev/null 2>&1 &) ; sleep 10;;
+            sound) osascript -e 'set volume with output muted';;
+            printer) sudo lpadmin -p HP_DeskJet_2700 -D "HP DeskJet 2700" -E -v ipp://10.0.0.99/ipp/print -m drv:///sample.drv/generic.ppd && sudo cupsdisable HP_DeskJet_2700 && lpstat -p;;
+          esac
+      - name: Ask for help (Mac)
+        if: runner.os == 'macOS'
+        env:
+          TEST_LOGIN: ${{ secrets.DF_STAGING_TEST_LOGIN }}
+        run: |
+          n="${{ github.run_number }}${{ strategy.job-index }}7"
+          R=$(curl -fsS -X POST -d "" "$STAGING/auth/test?n=$n" -H "x-test-login: $TEST_LOGIN")
+          TOKEN=$(echo "$R" | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
+          EMAIL=$(echo "$R" | python3 -c 'import sys,json,urllib.parse;print(urllib.parse.quote(json.load(sys.stdin)["email"]))')
+          launchctl setenv DESKFIX_TEST_SESSION "$TOKEN"; launchctl setenv DESKFIX_SERVER "$STAGING"; launchctl setenv DESKFIX_SHOW_IN_CAPTURE 1
+          [ -n "${{ inputs.model }}" ] && launchctl setenv DESKFIX_MODEL "${{ inputs.model }}"
+          launchctl setenv DESKFIX_AUTOPILOT "$AP"; LOG="$PWD/shots/task.log"; launchctl setenv DESKFIX_AUTOPILOT_LOG "$LOG"
+          ( i=0; while true; do screencapture -x "shots/shot-$(printf %03d $i).png"; i=$((i+1)); sleep 2; done ) & SHOOT=$!
+          open "$APP"
+          end=$(( $(date +%s) + 720 ))
+          while [ $(date +%s) -lt $end ]; do sleep 3; grep -qE 'DONE|PROBLEM|STOPPED' "$LOG" 2>/dev/null && { sleep 8; break; }; done
+          pkill -f "DeskFix.app/Contents/MacOS" || true; kill $SHOOT || true
+          curl -fsS "$STAGING/api/history" -H "authorization: Bearer $TOKEN" -o shots/history.json || true
+          curl -fsS -X POST -d '{"confirm":"delete"}' "$STAGING/api/account/delete" -H "authorization: Bearer $TOKEN" -H "content-type: application/json" >/dev/null || true
+          grep -E 'DONE|PROBLEM|STOPPED|tool error' "$LOG" || true
+
+      - name: Attach screenshots
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="tasks-${GITHUB_RUN_NUMBER}"; name="${{ runner.os }}-${{ matrix.task }}"
+          gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || gh release create "$tag" -R "$GITHUB_REPOSITORY" --prerelease --title "Task test ${GITHUB_RUN_NUMBER}" --notes "One VM per task" || true
+          cp shots/task.log "$name.log" 2>/dev/null || echo "no log" > "$name.log"
+          touch shots/.keep; if [ "${{ runner.os }}" = "Windows" ]; then 7z a -tzip "$name.zip" ./shots/* >/dev/null; else (cd shots && zip -qr "../$name.zip" .); fi
+          cp shots/history.json "$name.json" 2>/dev/null || echo "[]" > "$name.json"
+          gh release upload "$tag" -R "$GITHUB_REPOSITORY" "$name.zip" "$name.log" "$name.json" --clobber
+
+  # One table per run: did each task finish, and what did it cost.
+  summary:
+    needs: task
+    if: always()
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      MODEL: ${{ inputs.model }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: |
+          gh release download "tasks-${GITHUB_RUN_NUMBER}" -p "*.log" -p "*.json" -D r
+          python3 .github/summary.py r | tee summary.md >> "$GITHUB_STEP_SUMMARY"
+          gh release upload "tasks-${GITHUB_RUN_NUMBER}" summary.md --clobber

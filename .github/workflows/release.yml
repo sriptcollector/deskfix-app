@@ -1,0 +1,134 @@
+name: Release
+# Builds DeskFix for Mac (one universal app in a DMG) and Windows (per-user installer, no admin prompt).
+# Every build goes to its own pre-release and to the rolling "test" pre-release (the test channel):
+#   https://github.com/<repo>/releases/download/test/DeskFix-mac.dmg
+#   https://github.com/<repo>/releases/download/test/DeskFix-windows.exe
+# A v* tag run with publish=true (or `gh release edit <tag> --prerelease=false --latest`) makes it the
+# public release: releases/latest/download/DeskFix-mac.dmg, DeskFix-windows.exe and latest.json (updates).
+#
+# Signing plugs in by adding repo secrets; with none set the builds are unsigned (Mac: ad-hoc).
+#   Mac:     APPLE_CERTIFICATE (base64 .p12), APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY,
+#            APPLE_ID, APPLE_PASSWORD (app-specific), APPLE_TEAM_ID  -> Developer ID + notarization
+#   Windows: AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, and vars AZURE_SIGN_ENDPOINT,
+#            AZURE_SIGN_ACCOUNT, AZURE_SIGN_PROFILE                 -> Azure Artifact Signing
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Make this the public release (only on a v* tag)
+        type: boolean
+        default: false
+permissions:
+  contents: write
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            out: DeskFix-mac.dmg
+          - os: windows-latest
+            out: DeskFix-windows.exe
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 50
+    env:
+      DF_SERVER: ${{ vars.DF_SERVER }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || 'x86_64-pc-windows-msvc' }}
+      - name: Unit tests (hard blocks)
+        working-directory: app/src-tauri
+        shell: bash
+        run: mkdir -p ../dist && touch ../dist/index.html && cargo test --lib
+      - name: Signing, if the certificates are set
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+        run: |
+          # Empty variables would make the bundler try to sign, so they are passed on only when set.
+          echo '{}' > "$RUNNER_TEMP/sign.json"
+          if [ "${{ runner.os }}" = "macOS" ] && [ -n "$APPLE_CERTIFICATE" ]; then
+            for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do echo "$v=${!v}" >> "$GITHUB_ENV"; done
+            echo "Mac: Developer ID signing and notarization are on"
+          elif [ "${{ runner.os }}" = "Windows" ] && [ -n "$AZURE_CLIENT_ID" ]; then
+            for v in AZURE_TENANT_ID AZURE_CLIENT_ID AZURE_CLIENT_SECRET; do echo "$v=${!v}" >> "$GITHUB_ENV"; done
+            cargo install trusted-signing-cli --locked
+            echo '{"bundle":{"windows":{"signCommand":"trusted-signing-cli -e ${{ vars.AZURE_SIGN_ENDPOINT }} -a ${{ vars.AZURE_SIGN_ACCOUNT }} -c ${{ vars.AZURE_SIGN_PROFILE }} -d DeskFix %1"}}}' > "$RUNNER_TEMP/sign.json"
+            echo "Windows: Azure Artifact Signing is on"
+          else
+            echo "No certificates set: this build is unsigned"
+          fi
+      - name: Build
+        working-directory: app
+        shell: bash
+        run: |
+          bun install --frozen-lockfile
+          # A v1.2.3 tag sets the app version, so the updater sees a newer build.
+          VER='{}'; case "$GITHUB_REF_NAME" in v[0-9]*) [ "$GITHUB_REF_TYPE" = "tag" ] && VER="{\"version\":\"${GITHUB_REF_NAME#v}\"}";; esac
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            ./node_modules/.bin/tauri build --target universal-apple-darwin --bundles app,dmg --config "$VER" --config "$RUNNER_TEMP/sign.json"
+          else
+            ./node_modules/.bin/tauri build --bundles nsis --config "$VER" --config "$RUNNER_TEMP/sign.json"
+          fi
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p out
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp app/src-tauri/target/release/bundle/nsis/*-setup.exe "out/${{ matrix.out }}"
+            cp app/src-tauri/target/release/bundle/nsis/*-setup.exe.sig "out/${{ matrix.out }}.sig"
+          else
+            B=app/src-tauri/target/universal-apple-darwin/release/bundle
+            codesign --verify --deep --strict "$B/macos/DeskFix.app"
+            cp "$B"/dmg/*.dmg "out/${{ matrix.out }}"
+            cp "$B/macos/DeskFix.app.tar.gz" out/DeskFix-mac.app.tar.gz
+            cp "$B/macos/DeskFix.app.tar.gz.sig" out/DeskFix-mac.app.tar.gz.sig
+          fi
+          cd out && (sha256sum "${{ matrix.out }}" 2>/dev/null || shasum -a 256 "${{ matrix.out }}") > "${{ matrix.out }}.sha256"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ runner.os }}
+          path: out/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: out
+          merge-multiple: true
+      - name: Update feed and releases
+        run: |
+          tag="${GITHUB_REF_NAME}"; ver="${tag#v}"
+          [ "${GITHUB_REF_TYPE}" = "tag" ] || { tag="build-${GITHUB_RUN_NUMBER}"; ver="1.0.0"; }
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/$tag"
+          mac=$(cat out/DeskFix-mac.app.tar.gz.sig); win=$(cat out/DeskFix-windows.exe.sig)
+          jq -n --arg v "$ver" --arg d "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg mac "$mac" --arg win "$win" --arg base "$base" \
+            '{version:$v, pub_date:$d, platforms:{"darwin-aarch64":{signature:$mac,url:($base+"/DeskFix-mac.app.tar.gz")},"darwin-x86_64":{signature:$mac,url:($base+"/DeskFix-mac.app.tar.gz")},"windows-x86_64":{signature:$win,url:($base+"/DeskFix-windows.exe")}}}' > out/latest.json
+          cat out/*.sha256
+          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --target "$GITHUB_SHA" --title "DeskFix $tag" --notes "DeskFix for Mac and Windows." --prerelease
+          gh release upload "$tag" out/* --clobber
+          # The test channel: one fixed place that always holds the newest build.
+          gh release view test >/dev/null 2>&1 || gh release create test --target "$GITHUB_SHA" --title "DeskFix test channel" --notes "The newest test build. It changes often." --prerelease
+          gh release upload test out/* --clobber
+          if [ "${{ inputs.publish }}" = "true" ] && [ "${GITHUB_REF_TYPE}" = "tag" ]; then gh release edit "$tag" --prerelease=false --latest; fi

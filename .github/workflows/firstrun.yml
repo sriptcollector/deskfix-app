@@ -1,0 +1,189 @@
+name: First run from default state
+# The release gate for system prompts (Orion's rule "Guide every system prompt, test from default state").
+# Mac: permissions are RESET (tccutil), never pre-granted. The app must add itself to each Settings list
+# (nobody presses "+"), guide each switch, notice the moment it's on, and resume after its own relaunch.
+# The workflow plays the person: it waits for DeskFix to appear in the list, then flips the switch
+# the way a person would. Any check failing fails the release. Frames every second -> a video.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to install (test = the newest test build)
+        required: true
+        default: test
+permissions:
+  contents: write
+env:
+  STAGING: ${{ vars.DF_STAGING }}
+  DF_DOWNLOADS: https://github.com/${{ github.repository }}/releases/download/${{ inputs.tag }}
+  BID: com.trydeskfix.app
+jobs:
+  mac:
+    runs-on: macos-latest
+    timeout-minutes: 40
+    steps:
+      - name: Install like a customer
+        run: |
+          curl -fsSL "$STAGING/install.sh" | sh
+          sleep 6; pkill -f "DeskFix.app/Contents/MacOS" || true
+          APP=/Applications/"DeskFix.app"; [ -d "$APP" ] || APP="$HOME/Applications/DeskFix.app"
+          echo "APP=$APP" >> $GITHUB_ENV
+      - name: What the Mac says about a browser download (for the first-open guide)
+        run: |
+          curl -fsSL "$DF_DOWNLOADS/DeskFix-mac.dmg" -o /tmp/DeskFix-mac.dmg
+          xattr -w com.apple.quarantine "0081;$(printf %x $(date +%s));Safari;" /tmp/DeskFix-mac.dmg
+          spctl -a -t open --context context:primary-signature -vv /tmp/DeskFix-mac.dmg 2>&1 || true
+          spctl -a -vv "$APP" 2>&1 || true
+      - name: True default state (reset every permission)
+        run: |
+          tccutil reset All "$BID" || true
+          sudo tccutil reset All "$BID" || true
+          SYS="/Library/Application Support/com.apple.TCC/TCC.db"
+          echo "rows for DeskFix before: $(sudo sqlite3 "$SYS" "select count(*) from access where client like '%deskfix%';")"
+      - name: First run, recorded
+        env:
+          TEST_LOGIN: ${{ secrets.DF_STAGING_TEST_LOGIN }}
+        run: |
+          set -u
+          mkdir -p frames
+          SYS="/Library/Application Support/com.apple.TCC/TCC.db"
+          n="${{ github.run_number }}91"
+          R=$(curl -fsS -X POST -d "" "$STAGING/auth/test?n=$n" -H "x-test-login: $TEST_LOGIN")
+          TOKEN=$(echo "$R" | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
+          EMAIL=$(echo "$R" | python3 -c 'import sys,json,urllib.parse;print(urllib.parse.quote(json.load(sys.stdin)["email"]))')
+          launchctl setenv DESKFIX_TEST_SESSION "$TOKEN"; launchctl setenv DESKFIX_SERVER "$STAGING"; launchctl setenv DESKFIX_SHOW_IN_CAPTURE 1
+          launchctl setenv DESKFIX_AUTOPILOT "fix:Make my text bigger"
+          LOG="$PWD/frames/firstrun.log"; launchctl setenv DESKFIX_AUTOPILOT_LOG "$LOG"
+          ( i=0; while true; do screencapture -x "frames/f-$(printf %04d $i).png"; i=$((i+1)); sleep 1; done ) & SHOOT=$!
+          open "$APP"
+          fail=0
+          USR="$HOME/Library/Application Support/com.apple.TCC/TCC.db"
+          # Newer macOS keeps the Screen Recording list outside TCC.db, so also read the Settings window itself.
+          inpane() { osascript -e 'tell application "System Events" to tell process "System Settings" to get entire contents of front window' 2>&1 | tr ',' '\n' | grep -c "DeskFix" || true; }
+          listed() { a=$(sudo sqlite3 "$SYS" "select count(*) from access where service='$1' and (client like '%deskfix%');"); b=$(sqlite3 "$USR" "select count(*) from access where service='$1' and (client like '%deskfix%');" 2>/dev/null || echo 0); echo $((a+b)); }
+          # Switch 1: Accessibility. DeskFix must already be in the list (no "+").
+          for i in $(seq 1 60); do [ "$(listed kTCCServiceAccessibility)" != "0" ] && break; sleep 1; done
+          if [ "$(listed kTCCServiceAccessibility)" = "0" ]; then echo "GATE FAIL: DeskFix not listed under Accessibility (person would need +)"; fail=1; else echo "GATE OK: listed under Accessibility"; fi
+          sleep 8   # the guide is on screen next to System Settings
+          sudo sqlite3 "$SYS" "update access set auth_value=2 where service='kTCCServiceAccessibility' and (client like '%deskfix%');"; sudo killall tccd 2>/dev/null || true
+          echo "person flipped switch 1"
+          # Switch 2: Screen recording.
+          for i in $(seq 1 60); do [ "$(listed kTCCServiceScreenCapture)" != "0" ] && break; grep -q "perm stage screen" "$LOG" 2>/dev/null && [ $i -gt 20 ] && break; sleep 1; done
+          sleep 4
+          # Newer macOS doesn't always list an app before it's been allowed; then the guide must show the "+" step.
+          if [ "$(listed kTCCServiceScreenCapture)" != "0" ] || [ "$(inpane)" != "0" ]; then echo "GATE OK: listed under Screen Recording"
+          elif grep -q "perm plus guide shown" "$LOG"; then echo "GATE OK: not listed by macOS, the drawn + step is on screen"
+          else echo "GATE FAIL: not listed and no + step (person would have to figure it out)"; fail=1; fi
+          grep -q "perm stage screen" "$LOG" && echo "GATE OK: moved on by itself after switch 1" || { echo "GATE FAIL: did not move on after switch 1"; fail=1; }
+          sleep 6
+          BIN="$APP/Contents/MacOS/deskfix"
+          sudo sqlite3 "$SYS" "update access set auth_value=2 where service='kTCCServiceScreenCapture' and (client like '%deskfix%');"
+          sudo sqlite3 "$SYS" "insert or replace into access (service,client,client_type,auth_value,auth_reason,auth_version,flags) values ('kTCCServiceScreenCapture','$BID',0,2,4,1,0);" || true
+          defaults write "$HOME/Library/Group Containers/group.com.apple.replayd/ScreenCaptureApprovals" "$BIN" -date "3024-01-01 00:00:00 +0000" || true
+          killall replayd 2>/dev/null || true; sudo killall tccd 2>/dev/null || true
+          echo "person flipped switch 2"
+          # The person clicks Allow on the Mac's extra screen box (it belongs to UserNotificationCenter).
+          ( for i in $(seq 1 60); do sleep 2; osascript -e 'tell application "System Events" to tell process "UserNotificationCenter" to if exists window 1 then click button "Allow" of window 1' 2>/dev/null && echo "person clicked Allow"; done ) &
+          # The person clicks Allow on the Mac's extra "bypass the private window picker" box if it shows.
+          ( for i in $(seq 1 40); do sleep 3; osascript -e 'tell application "System Events" to tell (first process whose frontmost is true) to if exists button "Allow" of window 1 then click button "Allow" of window 1' 2>/dev/null; osascript -e 'tell application "System Events" to repeat with p in (every process whose background only is false)
+            try
+              if exists (button "Allow" of window 1 of p) then click button "Allow" of window 1 of p
+            end try
+          end repeat' 2>/dev/null; done ) &
+          # The app relaunches itself and resumes; then the first help runs.
+          end=$(( $(date +%s) + 600 ))
+          while [ $(date +%s) -lt $end ]; do sleep 3; grep -qE 'DONE|PROBLEM|STOPPED' "$LOG" 2>/dev/null && { sleep 6; break; }; done
+          grep -q "perm relaunch" "$LOG" && grep -q "perm stage done" "$LOG" && echo "GATE OK: relaunched itself, resumed and confirmed a real screenshot" || { echo "GATE FAIL: no clean resume after relaunch"; fail=1; }
+          grep -E "DONE worked=true" "$LOG" && echo "GATE OK: first help worked" || { echo "GATE FAIL: first help didn't finish"; fail=1; }
+          # Regression (Mac test 2026-11-12): after the panel hides on focus loss, the menu bar icon must bring it back.
+          PID=$(pgrep -f "DeskFix.app/Contents/MacOS" | head -1)
+          onscreen() { swift - "$PID" <<'SWIFT' || echo 0
+          import CoreGraphics
+          let pid = Int(CommandLine.arguments[1]) ?? -1
+          let l = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+          print(l.filter { ($0[kCGWindowOwnerPID as String] as? Int) == pid && (($0[kCGWindowBounds as String] as? [String: Any])?["Height"] as? Double ?? 0) > 200 }.count)
+          SWIFT
+          }
+          clicktray() {
+          # A real mouse click on the menu bar icon, like a person's. (System Events' "click" is an accessibility press, which the
+          # status item does not treat as a mouse click, so it never reached the app.)
+          GEOM=$(osascript -e 'tell application "System Events" to tell (first process whose unix id is '"$PID"') to get {position, size} of menu bar item 1 of menu bar 2' 2>&1 | tr -d ' ')
+          echo "tray icon geometry: $GEOM"
+          swift - "$GEOM" <<'SWIFT'
+          import CoreGraphics
+          import Foundation
+          let n = CommandLine.arguments[1].split(separator: ",").compactMap { Double($0) }
+          if n.count == 4 {
+            let p = CGPoint(x: n[0] + n[2] / 2, y: n[1] + n[3] / 2)
+            for t in [CGEventType.mouseMoved, .leftMouseDown, .leftMouseUp] {
+              let e = CGEvent(mouseEventSource: nil, mouseType: t, mouseCursorPosition: p, mouseButton: .left)
+              e?.post(tap: .cghidEventTap)
+              Thread.sleep(forTimeInterval: 0.15)
+            }
+          } else { print("no icon geometry") }
+          SWIFT
+          }
+          [ "$(onscreen)" = "0" ] && { clicktray; sleep 3; }
+          [ "$(onscreen)" != "0" ] && echo "tray open 1: panel on screen" || echo "tray open 1: panel not on screen"
+          open -a TextEdit; sleep 3   # focus moves away: the panel hides itself
+          [ "$(onscreen)" = "0" ] && echo "focus loss: panel hid" || echo "focus loss: panel still on screen"
+          clicktray; sleep 3
+          if [ "$(onscreen)" != "0" ]; then echo "GATE OK: menu bar icon reopens the panel after it hid on focus loss"; else echo "GATE FAIL: menu bar icon does not reopen the panel after focus loss"; fail=1; fi
+          screencapture -x frames/reopen.png || true
+          osascript -e 'quit app "TextEdit"' 2>/dev/null || true
+          pkill -f "DeskFix.app/Contents/MacOS" || true; kill $SHOOT || true
+          curl -fsS -X POST -d '{"confirm":"delete"}' "$STAGING/api/account/delete" -H "authorization: Bearer $TOKEN" -H "content-type: application/json" >/dev/null || true
+          cat "$LOG"
+          echo "fail=$fail" > frames/gate.txt
+          exit $fail
+      - name: Attach the recording
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="firstrun-${GITHUB_RUN_NUMBER}"
+          gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || gh release create "$tag" -R "$GITHUB_REPOSITORY" --prerelease --title "First run from default state ${GITHUB_RUN_NUMBER}" --notes "Frames every second" || true
+          (cd frames && zip -qr ../mac-firstrun.zip .) && gh release upload "$tag" -R "$GITHUB_REPOSITORY" mac-firstrun.zip --clobber
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Install like a customer
+        shell: powershell
+        run: |
+          irm "$env:STAGING/install.ps1" | iex
+          Start-Sleep 8; Get-Process deskfix -ErrorAction SilentlyContinue | Stop-Process -Force
+      - name: First run, recorded
+        shell: powershell
+        env:
+          TEST_LOGIN: ${{ secrets.DF_STAGING_TEST_LOGIN }}
+        run: |
+          New-Item -ItemType Directory -Force frames | Out-Null
+          $n = "${{ github.run_number }}92"
+          $r = Invoke-RestMethod -Method Post -Uri "$env:STAGING/auth/test?n=$n" -Headers @{ 'x-test-login' = $env:TEST_LOGIN }
+          $env:DESKFIX_TEST_SESSION = $r.token; $env:DESKFIX_SERVER = $env:STAGING; $env:DESKFIX_SHOW_IN_CAPTURE = '1'
+          $env:DESKFIX_AUTOPILOT = "fix:Make my text bigger"; $env:DESKFIX_AUTOPILOT_LOG = "$PWD\frames\firstrun.log"
+          @'
+          Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+          $i = 0
+          while ($true) { $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds; $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+            [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size); $bmp.Save(("frames\f-{0:D4}.png" -f $i)); $bmp.Dispose(); $i++; Start-Sleep -Milliseconds 1000 }
+          '@ | Set-Content shoot.ps1
+          $shooter = Start-Process powershell -ArgumentList '-NoProfile','-File','shoot.ps1' -PassThru -WindowStyle Hidden
+          $app = Start-Process "$env:LOCALAPPDATA\DeskFix\deskfix.exe" -PassThru
+          $deadline = (Get-Date).AddMinutes(12)
+          while ((Get-Date) -lt $deadline) { Start-Sleep 3; if ((Test-Path $env:DESKFIX_AUTOPILOT_LOG) -and (Select-String -Path $env:DESKFIX_AUTOPILOT_LOG -Pattern 'DONE|PROBLEM|STOPPED' -Quiet)) { Start-Sleep 6; break } }
+          Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue; Stop-Process -Id $shooter.Id -Force -ErrorAction SilentlyContinue
+          try { Invoke-RestMethod -Method Post -Uri "$env:STAGING/api/account/delete" -Headers @{ authorization = "Bearer $($r.token)"; "content-type" = "application/json" } -Body '{"confirm":"delete"}' | Out-Null } catch {}
+          Get-Content $env:DESKFIX_AUTOPILOT_LOG
+          if (-not (Select-String -Path $env:DESKFIX_AUTOPILOT_LOG -Pattern 'DONE worked=true' -Quiet)) { Write-Host "GATE FAIL: first help didn't finish"; exit 1 }
+      - name: Attach the recording
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="firstrun-${GITHUB_RUN_NUMBER}"
+          gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || gh release create "$tag" -R "$GITHUB_REPOSITORY" --prerelease --title "First run from default state ${GITHUB_RUN_NUMBER}" --notes "Frames every second" || true
+          7z a -tzip windows-firstrun.zip ./frames/* >/dev/null && gh release upload "$tag" -R "$GITHUB_REPOSITORY" windows-firstrun.zip --clobber

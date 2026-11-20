@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>DeskFix listens while you tell it what you need. It only listens when you press the mic.</string>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>DeskFix looks at your screen while it helps you, so it can find the problem and show you where to click. You can pause this any time.</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>DeskFix asks System Events to switch between dark and light mode when you ask it to.</string>
+  <key>LSUIElement</key>
+  <true/>
+</dict>
+</plist>
