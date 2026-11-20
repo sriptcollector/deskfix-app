@@ -34,6 +34,16 @@ const SCRIPTS = {
     [tool("say", { text: "First we open a blank workbook.", expression: "focused", step: 2 }), { ...tool("mouse_move", { coordinate: [420, 300] }), toolset_name: "computer" }, tool("needs_you", { text: "Press Blank workbook here." })],
     [tool("done", { outcome: "You made a new spreadsheet.", worked: true, verified: true, cause: "", how_next_time: ["Open Excel", "Pick Blank workbook"], support_summary: "" })],
   ],
+  // "My computer is slow": read-only checks run with no card; the diagnosis has real numbers; then one
+  // command that changes something goes through the Allow fix card; a blocked one never runs.
+  slow: [
+    [tool("say", { text: "Checking what is slowing you down.", expression: "thinking", step: 1 }), tool("check", { what: "cpu" }), tool("check", { what: "memory" }), tool("check", { what: "disk" }), tool("check", { what: "startup" })],
+    [tool("run_command", { command: "Get-Process | Sort-Object CPU -Descending | Select-Object -First 5 Name,CPU", why: "Looking at the busiest programs", undo: "", timeout_s: 20 })],
+    [tool("propose", { understood: "Your computer is slow.", cause: "Chrome is using most of your memory, and 9 programs start with the computer.", task: "Speeding up the computer", steps: ["Close the extra Chrome windows", "Stop Spotify starting with the computer"], risk: "low" })],
+    [tool("say", { text: "Stopping Spotify from starting with the computer.", expression: "focused", step: 2 }), tool("run_command", { command: "Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name Spotify", why: "Stopping Spotify from starting with the computer", undo: "You can turn it back on in Spotify's settings.", timeout_s: 20 })],
+    [tool("run_command", { command: "Remove-Item -Recurse -Force C:\\Users", why: "Clearing space", undo: "", timeout_s: 20 })],
+    [tool("done", { outcome: "Your computer has more room now. Chrome was using most of the memory.", worked: true, verified: true, cause: "Chrome had many windows open and 9 programs started with the computer.", how_next_time: ["Close Chrome windows you are not using", "Open Settings, then Apps, then Startup"], support_summary: "" })],
+  ],
   fail: [
     [tool("propose", { understood: "Your printer says it is offline.", cause: "No printer is set up on this computer.", task: "Fixing the printer", steps: ["Look for your printer on the network", "Add it again"], risk: "medium" })],
     [tool("say", { text: "I am looking for your printer.", expression: "focused", step: 1 }), tool("quick", { action: "list_printers", arg: "" })],
@@ -56,7 +66,7 @@ const INIT = ({ view, token, os, flags }) => {
     },
     convertFileSrc: (x) => x,
     invoke: async (cmd, args) => {
-      window.__calls.push(cmd + (cmd === "act" || cmd === "quick" ? ":" + JSON.stringify(args) : ""));
+      window.__calls.push(cmd + (cmd === "act" || cmd === "quick" || cmd === "cmd_run" || cmd === "syscheck" ? ":" + JSON.stringify(args) : ""));
       if (cmd === "env_info") return { os, version: "1.0.0", server: "http://api.local", test_session: null, show_in_capture: false, autopilot: null, signin: null, model: null };
       if (cmd === "session_get") return token;
       if (cmd === "perms_status") return { screen: true, control: true };
@@ -65,6 +75,23 @@ const INIT = ({ view, token, os, flags }) => {
       if (cmd === "windows_list") return [];
       if (cmd === "front_app") return "Microsoft Excel (Book1)";
       if (cmd === "quick") return args.action === "text_size" ? "Text size is now 125%." : "No printers are installed.";
+      if (cmd === "syscheck") {
+        const R = {
+          cpu: ["The processor is busy (62% in use, 8 cores). The busiest programs: Chrome (41%), Spotify (9%). The computer has not been restarted for 23 days.", { load_pct: 62 }],
+          memory: ["Memory: 14 of 16 GB in use (88%). That is getting full.", { used_pct: 88 }],
+          disk: ["Main disk (C:): 7.2 GB free of 256 GB (97% full). That is very low: the computer needs about 10 GB free to run well.", []],
+          startup: ["9 programs start with the computer: Spotify, Discord, Steam, OneDrive, Teams, Zoom, Dropbox, Epic Games, iTunes Helper. That many slows down starting up.", []],
+        };
+        const [report, data] = R[args.what] ?? ["Fine.", {}];
+        return { what: args.what, data, report };
+      }
+      if (cmd === "cmd_classify") {
+        const c = String(args.command);
+        if (/remove-item -recurse|rm -rf \//i.test(c)) return { verdict: "blocked", reason: "deletes a whole folder tree" };
+        return /^get-|^ls|^df/i.test(c) ? { verdict: "allowed" } : { verdict: "approval" };
+      }
+      if (cmd === "cmd_run") return { ok: true, code: 0, output: args.command.startsWith("Get-Process") ? "Name    CPU\nchrome  412\nSpotify 88" : "", cut: false, timed_out: false, ms: 120 };
+      if (cmd === "cmd_stop") return null;
       if (cmd === "plugin:event|listen") return ((listeners[args.event] ??= []).push(args.handler), args.handler);
       if (cmd === "plugin:event|emit" || cmd === "plugin:event|emit_to") return window.__emit(args.event, args.payload), null;
       if (cmd === "plugin:window|scale_factor") return 1;
@@ -190,6 +217,50 @@ for (const dark of [false, true]) {
   assert.match(JSON.stringify(p.agentBodies.at(-1).messages.at(-1)), /Do it for me/);
   console.log("ok teach + do it for me");
 
+  // "My computer is slow": checks need no card; the diagnosis shows numbers; a changing command gets the card
+  // with the command under Details; a blocked command never reaches cmd_run.
+  p = await open({ script: "slow", dark, delay: 400 });
+  await bg(p, dark);
+  await p.getByRole("button", { name: "My computer is slow" }).click();
+  await p.getByText("97% full").waitFor();
+  await p.getByRole("button", { name: "Allow fix" }).waitFor();
+  const callsBeforeAllow = await p.evaluate(() => window.__calls.filter((c) => c.startsWith("cmd_run") || c.startsWith("syscheck")));
+  assert.equal(callsBeforeAllow.filter((c) => c.startsWith("syscheck")).length, 4, "the four checks did not run before the card");
+  assert.equal(callsBeforeAllow.filter((c) => c.startsWith("cmd_run")).length, 1, "the read-only command should run without a card");
+  await shot(p, `18-slow-diagnosis${sfx}`);
+  await p.getByRole("button", { name: "Allow fix" }).click();
+  await p.locator('[data-card="command"]').waitFor();
+  assert.equal(await p.locator("pre.cmd").count(), 0, "the command must sit under Details until opened");
+  await shot(p, `19-command-card${sfx}`);
+  await p.getByRole("button", { name: "Details" }).click();
+  await p.locator("pre.cmd").waitFor();
+  await shot(p, `20-command-card-details${sfx}`);
+  await p.getByRole("button", { name: "Allow fix" }).click();
+  await p.getByText("Problem solved").waitFor();
+  const ran = await p.evaluate(() => window.__calls.filter((c) => c.startsWith("cmd_run")));
+  assert.equal(ran.length, 2, `two commands should have run, got ${ran.length}`);
+  assert.ok(!(await p.evaluate(() => window.__calls.some((c) => c.startsWith("cmd_run") && c.includes("Remove-Item -Recurse")))), "a blocked command reached cmd_run");
+  await p.getByText("I won't do that one").waitFor();
+  console.log("ok slow: checks free, command card, blocked never runs");
+  if (!dark) {
+    // Cancel on the command card: the command does not run.
+    const c = await open({ script: "slow", delay: 200 });
+    await c.getByRole("button", { name: "My computer is slow" }).click();
+    await c.getByRole("button", { name: "Allow fix" }).click();
+    await c.locator('[data-card="command"]').waitFor();
+    await c.getByRole("button", { name: "Cancel" }).click();
+    await c.getByText("That command did not run").waitFor();
+    assert.ok(!(await c.evaluate(() => window.__calls.some((x) => x.startsWith("cmd_run") && x.includes("Spotify")))), "Cancel still ran the command");
+    console.log("ok command cancel");
+    // History shows the commands run on this computer.
+    const h = await open({});
+    await h.evaluate(() => localStorage.setItem("df_commands", JSON.stringify([{ at: Date.now(), why: "Stopping Spotify from starting with the computer", command: "Remove-ItemProperty -Path 'HKCU:\\...\\Run' -Name Spotify", ok: true, approved: true }, { at: Date.now() - 60000, why: "Looking at the busiest programs", command: "Get-Process | Sort-Object CPU -Descending | Select-Object -First 5", ok: true, approved: false }])));
+    await h.getByRole("tab", { name: "History" }).click();
+    await h.getByText("Commands run on this computer").click();
+    await h.getByText("Stopping Spotify").waitFor();
+    await shot(h, "21-history-commands");
+  }
+
   // Failure: plain words, a safe alternative, a summary to share. Never "Problem solved".
   p = await open({ script: "fail", dark });
   await bg(p, dark);
@@ -229,6 +300,28 @@ for (const dark of [false, true]) {
   });
   await p.waitForTimeout(500);
   await shot(p, `16-teach-highlight${sfx}`);
+  // The DeskFix cursor gliding to a button with its label; Stop freezes it where it is.
+  await p.evaluate(() => {
+    window.__emit("ov:point", null);
+    window.__emit("ov:say", { text: null });
+    window.__emit("ov:expr", { expr: "focused" });
+    window.__emit("ov:label", { text: "Opening a blank workbook" });
+    window.__emit("ov:fly", { x: 243, y: 245, ms: 1 });
+  });
+  await p.waitForTimeout(400);
+  assert.equal(await p.getByRole("img", { name: "DeskFix cursor: Opening a blank workbook" }).count(), 1, "the DeskFix cursor is not labelled");
+  await shot(p, `22-deskfix-cursor${sfx}`);
+  await p.evaluate(() => {
+    window.__emit("ov:fly", { x: 900, y: 600, ms: 4000 });
+  });
+  await p.waitForTimeout(300);
+  await p.evaluate(() => window.__emit("ov:expr", { expr: "stopped" }));
+  await p.waitForTimeout(100);
+  const frozenAt = await p.evaluate(() => new DOMMatrix(getComputedStyle(document.querySelector(".dfcursor")).transform).e);
+  await p.waitForTimeout(600);
+  const stillAt = await p.evaluate(() => new DOMMatrix(getComputedStyle(document.querySelector(".dfcursor")).transform).e);
+  assert.ok(Math.abs(frozenAt - stillAt) < 2 && frozenAt < 880, `Stop did not freeze the cursor (${frozenAt} -> ${stillAt})`);
+  console.log("ok cursor stops instantly");
 
   // Dashboard: four sections only
   p = await open({ view: "dashboard", size: [960, 640], dark });

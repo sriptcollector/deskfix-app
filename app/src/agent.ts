@@ -4,15 +4,19 @@
 import { emitTo } from "@tauri-apps/api/event";
 import { register, unregister } from "@tauri-apps/plugin-global-shortcut";
 import { invoke } from "@tauri-apps/api/core";
-import { act, apLog, api, autopilot, ApiError, capture, cursor, frontApp, getEnv, hush, speak, track, type Settings, type Shot } from "./api";
+import { act, apLog, api, autopilot, ApiError, capture, cmdClassify, cmdRun, cmdStop, cursor, frontApp, getEnv, hush, logCommand, speak, syscheck, track, type CommandLog, type Settings, type Shot } from "./api";
 import type { Expr } from "./bot";
 
 export type Mode = "chat" | "fix" | "teach";
 export type Proposal = { understood: string; cause: string; task: string; steps: string[]; risk: "low" | "medium" | "high" };
+/** A command that changes something: the person sees `why` in plain words, the command itself under Details. */
+export type CommandAsk = { why: string; command: string; undo: string };
 export type Result = { outcome: string; worked: boolean; verified: boolean; cause: string; steps: string[]; support: string };
 export type UI = {
   settings: () => Settings;
   propose: (p: Proposal) => Promise<boolean>; // the approval card: Allow fix (true) or Cancel (false)
+  command: (c: CommandAsk) => Promise<boolean>; // the same card for one command that changes something
+  checked: (what: string, report: string) => void; // a system check's plain-words result, shown in the chat
   ask: (question: string, options: string[]) => Promise<string>;
   bot: (text: string) => void; // a line in the chat panel
   avoid: (x: number, y: number) => Promise<void>; // move the Step pill off the spot about to be pressed
@@ -25,6 +29,7 @@ export type UI = {
 
 const RISKY = /\b(delet|trash|empty the|erase all|erase (your|the)|factory reset|reset (your|the) (mac|pc|computer|phone|password)|pay\b|paying|payment|purchas|buy|checkout|send|post\b|posting|reply|share|password|passcode|install|uninstall|update now|software update|sign(ing)? out|log(ging)? out|accept|agree to|subscribe)/i;
 const ov = (name: string, payload: unknown = {}) => emitTo("overlay", name, payload);
+const CHECK_LABEL: Record<string, string> = { cpu: "Checking the processor", gpu: "Checking the graphics card", memory: "Checking memory", disk: "Checking disk space", battery: "Checking the battery", temperature: "Checking temperatures", network: "Checking the internet", startup: "Checking what starts up", system: "Checking the computer", all: "Checking the whole computer" };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const hash = (s: string) => {
   let h = 0;
@@ -45,6 +50,10 @@ export class Session {
   app: string | null = null;
   /** Undo journal: every change in order, so "Undo that" can reverse exactly what happened, even later. */
   journal: { at: number; step: number; said?: string; did?: string }[] = [];
+  /** Every command run in this help, sent to the server so it lands in History with the job. */
+  commands: CommandLog[] = [];
+  /** The short label on the DeskFix cursor ("Opening Settings"): the last say line, shortened. */
+  private label: string | null = null;
   private note(entry: { said?: string; did?: string }) {
     this.journal.push({ at: Date.now(), step: this.n, ...entry });
     try {
@@ -80,9 +89,11 @@ Only reverse real changes (settings, text, files). Then call done.`;
     if (this.aborted) return;
     this.aborted = true;
     hush();
+    cmdStop(); // a running command dies with the Stop press
     act({ do: "up" }).catch(() => {});
     clearInterval(this.watching);
     ov("ov:expr", { expr: "stopped" });
+    ov("ov:label", { text: null });
     ov("ov:say", { text: null });
     ov("ov:confirm", null);
     ov("ov:point", null);
@@ -154,7 +165,7 @@ Only reverse real changes (settings, text, files). Then call done.`;
     const env = await getEnv();
     for (let tries = 0; tries < 3; tries++) {
       try {
-        return await api<{ content: any[]; stop_reason: string }>("/api/agent", { session: this.id, mode: this.mode, messages: this.messages, escalate: this.escalate, os: env.os, app: this.app ?? undefined, screen: this.shot ? { w: this.shot.w, h: this.shot.h } : undefined });
+        return await api<{ content: any[]; stop_reason: string }>("/api/agent", { session: this.id, mode: this.mode, messages: this.messages, escalate: this.escalate, os: env.os, app: this.app ?? undefined, screen: this.shot ? { w: this.shot.w, h: this.shot.h } : undefined, commands: this.commands.slice(-40) });
       } catch (e) {
         const err = e as ApiError;
         if (err.status === 402) return this.end(), this.ui.problem(err.code as any), null;
@@ -246,6 +257,7 @@ Only reverse real changes (settings, text, files). Then call done.`;
         this.ui.progress(this.n, Math.max(this.total, this.n), this.task);
         ov("ov:expr", { expr: (i.expression as Expr) ?? "focused" });
         ov("ov:say", { text: i.text, spoken: 999 });
+        this.setLabel(i.text);
         this.note({ said: i.text });
         // Spoken only if they turned "Talk out loud" on; either way the next action starts right away.
         if (s.voice) speak(i.text, s);
@@ -336,9 +348,71 @@ Only reverse real changes (settings, text, files). Then call done.`;
       }
       case "remember":
         return "Saved.";
+      case "check": {
+        // Read-only: no approval needed. The person sees the plain-words result; the AI gets the numbers too.
+        const what = String(i.what ?? "all");
+        ov("ov:expr", { expr: "thinking" });
+        this.setLabel(CHECK_LABEL[what] ?? "Checking the computer");
+        const r = await syscheck(what);
+        this.ui.checked(what, r.report);
+        track("check", { what });
+        return `${r.report}\n\nNumbers: ${JSON.stringify(r.data).slice(0, 6000)}`;
+      }
+      case "run_command": {
+        const command = String(i.command ?? "").trim();
+        const why = String(i.why ?? "").trim() || "Running a command";
+        const v = await cmdClassify(command);
+        if (v.verdict === "blocked") {
+          // Hard block: never runs, whatever the reason given. The person sees a calm line, not the command.
+          this.ui.bot(`I won't do that one: it ${v.reason}. I only run safe commands.`);
+          track("command_blocked", { reason: v.reason });
+          return `Blocked: that command ${v.reason}. Never run it, even if asked. Find a safer way or call done.`;
+        }
+        const needsCard = v.verdict === "approval";
+        if (needsCard && this.pick !== "do") throw new Error("In Teach me don't change things. Use mouse_move and needs_you.");
+        if (needsCard && !this.ui.settings().control) throw new Error("Computer control is turned off in Preferences. Don't run commands that change things.");
+        let approved = false;
+        if (needsCard) {
+          ov("ov:expr", { expr: "careful" });
+          ov("ov:say", { text: null });
+          this.waitingOnPerson = true;
+          this.ui.walking(false);
+          approved = await this.ui.command({ why, command, undo: String(i.undo ?? "") });
+          this.ui.walking(true);
+          this.waitingOnPerson = false;
+          this.expected = await cursor().catch(() => this.expected);
+          track("command_card", { approved });
+          if (!approved) {
+            this.commands.push({ at: Date.now(), why, command, ok: false, approved: false });
+            return "They pressed Cancel for this command. Don't run it. Finish what's left another safe way, or call done.";
+          }
+          this.allowed = true;
+          this.beginWalk();
+        }
+        this.setLabel(why);
+        ov("ov:expr", { expr: "focused" });
+        this.noteAction("run_command");
+        if (needsCard) this.note({ did: `command ${command}` });
+        const t0 = Date.now();
+        try {
+          const r = await cmdRun(command, approved, Number(i.timeout_s) || undefined);
+          const entry = { at: t0, why, command, ok: r.ok, approved };
+          this.commands.push(entry);
+          logCommand(entry);
+          track("command_ran", { ok: r.ok, ms: r.ms, approved, timed_out: r.timed_out });
+          if (r.timed_out) return `It took too long and was stopped after ${Math.round(r.ms / 1000)} s. Output so far:\n${r.output.slice(0, 6000)}`;
+          return `${r.ok ? "Done" : `Finished with an error (code ${r.code})`}.${r.cut ? " Output was cut short." : ""}\n${r.output.slice(0, 6000) || "(no output)"}`;
+        } catch (e) {
+          const entry = { at: t0, why, command, ok: false, approved };
+          this.commands.push(entry);
+          logCommand(entry);
+          throw new Error(String((e as Error)?.message ?? e));
+        }
+      }
       case "done": {
         this.end();
         ov("ov:expr", { expr: i.worked ? "happy" : "sorry" });
+        ov("ov:label", { text: null });
         ov("ov:say", { text: null });
         // "Problem solved" is shown only when the assistant checked the result itself.
         this.ui.done({ outcome: i.outcome ?? "", worked: !!i.worked && !!i.verified, verified: !!i.verified, cause: i.cause ?? "", steps: i.how_next_time ?? [], support: i.support_summary ?? "" });
@@ -347,6 +421,14 @@ Only reverse real changes (settings, text, files). Then call done.`;
       }
     }
     throw new Error(`unknown tool ${name}`);
+  }
+
+  /** The DeskFix cursor's tag: a few words, present tense ("Opening Settings"). Empty when there's nothing to say. */
+  private setLabel(text: string | null) {
+    const short = text ? text.replace(/[.!]+$/, "").split(/[,.;:]/)[0].trim().slice(0, 36) : null;
+    if (short === this.label) return;
+    this.label = short;
+    ov("ov:label", { text: short });
   }
 
   private beginWalk() {
@@ -370,6 +452,7 @@ Only reverse real changes (settings, text, files). Then call done.`;
     const ms = Math.min(700, Math.max(250, Math.hypot(to[0] - from[0], to[1] - from[1]) / 1.2));
     return this.ui.settings().moveSpeed === "slow" ? ms * 1.6 : ms;
   }
+  /** The DeskFix cursor glides to the spot on the overlay. The person's own pointer never moves. */
   private async moveTo(c: [number, number]) {
     const p = this.toScreen(c);
     const ms = this.flightMs(p);
@@ -377,8 +460,11 @@ Only reverse real changes (settings, text, files). Then call done.`;
     await this.ui.avoid(p[0], p[1]);
     ov("ov:fly", { x: p[0], y: p[1], ms });
     await sleep(ms);
+    this.at = p;
     return p;
   }
+  /** Where the DeskFix cursor is (clicks without a coordinate go here). */
+  private at: [number, number] | null = null;
   private async doing<T>(f: () => Promise<T>, p: [number, number] | null) {
     this.busy = true;
     try {
@@ -436,8 +522,8 @@ Only reverse real changes (settings, text, files). Then call done.`;
         return [{ type: "image", source: { type: "base64", media_type: "image/jpeg", data: z.data } }];
       }
       case "mouse_move": {
-        const p = await this.moveTo(i.coordinate);
-        await this.doing(() => act({ do: "move", x: p[0], y: p[1] }), p);
+        // Only the DeskFix cursor moves. (Hover menus: the AI clicks them instead.)
+        await this.moveTo(i.coordinate);
         return "OK";
       }
       case "left_click":
@@ -445,13 +531,15 @@ Only reverse real changes (settings, text, files). Then call done.`;
       case "middle_click":
       case "double_click":
       case "triple_click": {
-        let p = this.expected ?? [0, 0];
+        let p = this.at ?? this.expected ?? [0, 0];
         if (i.coordinate) p = await this.moveTo(i.coordinate);
         await sleep(150); // the eye catches up before the press
         ov("ov:expr", { expr: "pressing" });
         ov("ov:press", { x: p[0], y: p[1] });
         const count = name === "double_click" ? 2 : name === "triple_click" ? 3 : 1;
-        await this.doing(() => act({ do: "click", x: p[0], y: p[1], button: name === "right_click" ? "right" : name === "middle_click" ? "middle" : "left", count, modifiers: i.text ?? null }), p);
+        // Soft first (the OS presses the control, the pointer stays with the person); a real click puts the pointer back after.
+        const how = await this.doing(() => act({ do: "click", x: p[0], y: p[1], button: name === "right_click" ? "right" : name === "middle_click" ? "middle" : "left", count, modifiers: i.text ?? null, soft: name === "left_click", restore: true }), null);
+        if (typeof how === "string" && how.startsWith("soft")) track("help_step", { tool: "soft_click", what: how.slice(5, 60) });
         ov("ov:expr", { expr: "focused" });
         await sleep(350); // let the screen settle
         return "OK";
@@ -461,7 +549,8 @@ Only reverse real changes (settings, text, files). Then call done.`;
         await this.moveTo(i.start_coordinate);
         const b = this.toScreen(i.coordinate);
         ov("ov:fly", { x: b[0], y: b[1], ms: 500 });
-        await this.doing(() => act({ do: "drag", from: a, to: b }), b);
+        this.at = b;
+        await this.doing(() => act({ do: "drag", from: a, to: b, restore: true }), null);
         await sleep(400);
         return "OK";
       }
@@ -473,14 +562,13 @@ Only reverse real changes (settings, text, files). Then call done.`;
         return "OK";
       case "scroll": {
         const p = i.coordinate ? await this.moveTo(i.coordinate) : null;
-        await this.doing(() => act({ do: "scroll", x: p?.[0] ?? null, y: p?.[1] ?? null, direction: i.scroll_direction, amount: i.scroll_amount ?? 3 }), p);
+        await this.doing(() => act({ do: "scroll", x: p?.[0] ?? null, y: p?.[1] ?? null, direction: i.scroll_direction, amount: i.scroll_amount ?? 3, restore: true }), null);
         await sleep(400);
         return "OK";
       }
       case "type": {
         await this.releaseKeyboard();
         ov("ov:expr", { expr: "focused" });
-        if (this.expected) ov("ov:fly", { x: this.expected[0], y: this.expected[1], ms: 200 });
         try {
           await this.doing(() => act({ do: "type", text: String(i.text ?? "") }), null);
         } catch (e) {

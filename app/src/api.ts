@@ -27,7 +27,8 @@ export type Me = {
   memories: string[];
   test: boolean;
 };
-export type HistoryRow = { at: number; mode: "chat" | "fix" | "teach"; task: string; outcome: string; worked: boolean; cause: string; steps: string[]; support: string };
+export type CommandLog = { at: number; why: string; command: string; ok: boolean; approved: boolean };
+export type HistoryRow = { at: number; mode: "chat" | "fix" | "teach"; task: string; outcome: string; worked: boolean; cause: string; steps: string[]; support: string; commands?: CommandLog[] };
 
 let env: Env | null = null;
 let token: string | null = null;
@@ -102,7 +103,24 @@ export async function capture(region?: [number, number, number, number], max = 1
     emit("veil", false);
   }
 }
-export const act = (action: Record<string, unknown>) => invoke<void>("act", { action });
+export const act = (action: Record<string, unknown>) => invoke<string>("act", { action });
+// System checks (read-only) and commands (gated in Rust: blocked / read-only / needs the Allow fix card).
+export type Verdict = { verdict: "blocked"; reason: string } | { verdict: "allowed" } | { verdict: "approval" };
+export const syscheck = (what: string) => invoke<{ what: string; data: unknown; report: string }>("syscheck", { what });
+export const cmdClassify = (command: string) => invoke<Verdict>("cmd_classify", { command });
+export const cmdRun = (command: string, approved: boolean, timeoutS?: number) => invoke<{ ok: boolean; code: number | null; output: string; cut: boolean; timed_out: boolean; ms: number }>("cmd_run", { command, approved, timeoutS: timeoutS ?? null });
+export const cmdStop = () => invoke("cmd_stop").catch(() => {});
+/** Every command this computer ran for the person, newest first, kept on this computer (last 200). */
+export function commandLog(): CommandLog[] {
+  try {
+    return JSON.parse(localStorage.getItem("df_commands") ?? "[]");
+  } catch {
+    return [];
+  }
+}
+export function logCommand(c: CommandLog) {
+  localStorage.setItem("df_commands", JSON.stringify([c, ...commandLog()].slice(0, 200)));
+}
 export const cursor = () => invoke<[number, number] | null>("cursor");
 export const frontApp = () => invoke<string | null>("front_app").catch(() => null);
 export const overlayMode = (visible: boolean, interactive = false) => invoke("overlay_mode", { visible, interactive });

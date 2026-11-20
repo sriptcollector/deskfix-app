@@ -1,21 +1,43 @@
 name: Check
-# Every PR and push to main: the same typecheck + Rust unit tests the release runs, so a break is
-# caught before a tag.
+# Every PR and push to main, on a Mac and a Windows runner: typecheck, the Rust unit tests (command
+# allowlist and block list, soft-click rules, system checks on a real machine), and the screens script
+# (every flow through the real session engine against a fake server, with screenshots as an artifact).
 on:
   pull_request:
   push:
     branches: [main]
 jobs:
   check:
-    runs-on: macos-latest
-    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-      - name: Typecheck
+      - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
+        with:
+          workspaces: app/src-tauri
+      - name: Typecheck and build
         working-directory: app
-        run: bun install --frozen-lockfile && bunx tsc -b
-      - name: Unit tests
+        shell: bash
+        run: bun install --frozen-lockfile && bunx tsc -b && bun run build
+      - name: Unit tests (allowlist, block list, approval gate, soft click, system checks)
         working-directory: app/src-tauri
-        run: mkdir -p ../dist && touch ../dist/index.html && cargo test --lib
+        shell: bash
+        run: cargo test --lib
+      - name: Screens (fake server, scripted agent)
+        working-directory: app
+        shell: bash
+        run: |
+          npm install --no-save --no-package-lock playwright@1.52.0
+          npx playwright install chromium
+          PLAYWRIGHT="$PWD/node_modules/playwright" node scripts/screens.mjs shots
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: screens-${{ matrix.os }}
+          path: app/shots

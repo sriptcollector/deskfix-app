@@ -2,11 +2,14 @@
 // screenshots, mouse and keyboard, the sign-in loopback, and the macOS permission checks.
 // The AI never runs here; it decides on the server and the panel's code asks this side to act.
 // Safety rules that must not depend on the AI's judgment live here too (see `guard_text`).
+mod cmd;
+mod extra;
 mod input;
 mod perms;
-mod extra;
 mod quick;
 mod screen;
+mod soft;
+mod sys;
 
 use serde::Serialize;
 use std::io::{BufRead, BufReader, Write};
@@ -448,6 +451,10 @@ pub fn run() {
             input::act,
             input::cursor,
             quick::quick,
+            sys::syscheck,
+            cmd::cmd_classify,
+            cmd::cmd_run,
+            cmd::cmd_stop,
             perms::perms_status,
             perms::perms_open,
             panel_front,
